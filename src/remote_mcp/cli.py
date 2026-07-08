@@ -536,3 +536,47 @@ def add_database_cmd(
             "DB_MAX_ROWS=200\n"
             "DB_STATEMENT_TIMEOUT_MS=5000\n"
         )
+
+
+@app.command()
+def doctor(
+    project_dir: Path = typer.Option(Path("."), "--project-dir", "-p"),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Re-fetch spec / re-introspect DB to check source drift."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Report drift between sources.lock.json and reality. Exit: 0 clean, 1 drift, 2 error."""
+    import json as json_mod
+
+    from remote_mcp.sources.doctor import run_doctor
+
+    try:
+        _require_scaffolded_project(project_dir)
+    except typer.Exit as exc:
+        # For doctor, exit 1 is reserved for "drift found" — a missing or
+        # non-scaffolded project is an error, same class as a corrupt manifest.
+        raise typer.Exit(2) from exc
+    try:
+        report = run_doctor(project_dir, refresh=refresh)
+    except ManifestError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    if as_json:
+        typer.echo(json_mod.dumps(report.to_dict(), indent=2))
+    else:
+        from rich.table import Table
+
+        for src in report.sources:
+            table = Table(title=f"{src.kind}:{src.name}")
+            table.add_column("file")
+            table.add_column("status")
+            for f in src.files:
+                style = {"clean": "green", "modified": "yellow", "missing": "red"}[f.status]
+                table.add_row(f.path, f"[{style}]{f.status}[/{style}]")
+            console.print(table)
+            if src.version_drift:
+                console.print(f"  [yellow]version drift:[/yellow] {src.version_drift}")
+            console.print(f"  source: {src.source_drift}")
+    raise typer.Exit(1 if report.has_drift else 0)
