@@ -389,3 +389,150 @@ def add_openapi_cmd(
         mount_lines.append(f"from src.tools.{api_slug}.{g} import {api_slug}_{g}_router")
     mount_lines += [f"mcp.mount({api_slug}_{g}_router)" for g in groups]
     _print_generation_result(files, summary, mount_lines)
+
+
+_WRITE_OPS = ("insert", "update")
+
+
+def _parse_allow_write(specs: list[str]) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for spec in specs:
+        table, sep, op = spec.partition(":")
+        if not sep or op not in _WRITE_OPS:
+            raise typer.BadParameter(
+                f"--allow-write expects TABLE:OP with OP in {{{', '.join(_WRITE_OPS)}}}; got {spec!r}."
+            )
+        out.setdefault(table, set()).add(op)
+    return out
+
+
+def _display_locator(sanitized_dsn: str, dialect: str) -> str:
+    """A locator safe to embed in generated files (docstrings/headers).
+
+    `sanitize_dsn` only strips authentication credentials, so a local sqlite
+    path (which carries none) passes through unchanged — collapse it to just
+    the filename so an absolute, machine-specific path never ends up in
+    generated source. The manifest keeps the full sanitized DSN: `doctor
+    --refresh` re-introspects from it, and a basename-only sqlite path would
+    silently create an empty database in whatever directory doctor runs from.
+    """
+    if dialect != "sqlite":
+        return sanitized_dsn
+    scheme, sep, rest = sanitized_dsn.partition("://")
+    if not sep:
+        return sanitized_dsn
+    return f"{scheme}:///{Path(rest.lstrip('/')).name}"
+
+
+@add_app.command("database")
+def add_database_cmd(
+    dsn: str = typer.Argument(..., help="Database DSN: sqlite:/// | postgresql:// | mysql://"),
+    project_dir: Path = typer.Option(Path("."), "--project-dir", "-p"),
+    include: list[str] = typer.Option([], "--include", help="Table-name glob(s)."),
+    exclude: list[str] = typer.Option([], "--exclude", help="Table-name glob(s) to drop."),
+    schema: str | None = typer.Option(
+        None, "--schema", help="DB schema (driver default if unset)."
+    ),
+    allow_write: list[str] = typer.Option(
+        [], "--allow-write", help="Enable a write tool: TABLE:OP, OP in {insert, update}."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Non-interactive; needs --include."),
+) -> None:
+    """Generate read-only DB tools from a live schema. Requires: pip install 'remote-mcp[db]'."""
+    _require_scaffolded_project(project_dir)
+    try:
+        writes = _parse_allow_write(allow_write)
+    except typer.BadParameter as exc:
+        console.print(f"[red]Error: {exc.message}[/red]")
+        raise typer.Exit(1) from exc
+    from remote_mcp import __version__
+    from remote_mcp.sources import IntrospectionError
+    from remote_mcp.sources.database.introspect import (
+        dialect_of,
+        introspect_database,
+        sanitize_dsn,
+        schema_fingerprint,
+    )
+    from remote_mcp.sources.database.render import render_database_tools
+
+    try:
+        dialect = dialect_of(dsn)
+        tables = introspect_database(dsn, schema=schema)
+        candidates = [
+            Candidate(id=t.name, label=f"{t.name} ({len(t.columns)} cols)") for t in tables
+        ]
+        chosen = resolve_selection(candidates, include=include, exclude=exclude, tags=[], yes=yes)
+    except (IntrospectionError, SelectionError) as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    chosen_names = {c.id for c in chosen}
+    selected = [t for t in tables if t.name in chosen_names]
+    unknown_writes = set(writes) - chosen_names
+    if unknown_writes:
+        console.print(
+            f"[red]Error: --allow-write names tables outside the selection: "
+            f"{', '.join(sorted(unknown_writes))}[/red]"
+        )
+        raise typer.Exit(1)
+
+    manifest_locator = sanitize_dsn(dsn)
+    files = render_database_tools(
+        selected, writes, dialect, __version__, _display_locator(manifest_locator, dialect)
+    )
+    summary = diff_summary(project_dir, files)
+
+    try:
+        manifest = load_manifest(project_dir)
+    except ManifestError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    try:
+        stage_and_write(project_dir, files)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    upsert_source(
+        manifest,
+        SourceEntry(
+            kind="database",
+            name="db",
+            locator=manifest_locator,
+            source_sha256=schema_fingerprint(selected),
+            selected=sorted(chosen_names),
+            generated_files=[
+                GeneratedFile(path=rel, sha256=hash_bytes(content.encode("utf-8")))
+                for rel, content in files.items()
+            ],
+            generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            generator_version=__version__,
+        ),
+    )
+    save_manifest(project_dir, manifest)
+
+    driver = {"sqlite": "aiosqlite", "postgresql": "asyncpg", "mysql": "aiomysql"}[dialect]
+    _print_generation_result(
+        files,
+        summary,
+        [
+            "from src.tools.db.tools import db_router",
+            "mcp.mount(db_router)",
+            f"# then: pip install {driver}   and set DATABASE_URL in your deploy env",
+        ],
+    )
+    console.print(
+        "[yellow]Reminder:[/yellow] db tools act as the SERVER (server-side credentials), "
+        "not as the caller. Set DATABASE_URL in the deploy environment; it is never "
+        "written into generated files."
+    )
+
+    env_example = project_dir / "env.example"
+    if env_example.exists() and "DATABASE_URL" not in env_example.read_text(encoding="utf-8"):
+        env_example.open("a", encoding="utf-8").write(
+            "\n# Database tools (added by `remote-mcp add database`)\n"
+            "DATABASE_URL=\n"
+            "DB_MAX_ROWS=200\n"
+            "DB_STATEMENT_TIMEOUT_MS=5000\n"
+        )
