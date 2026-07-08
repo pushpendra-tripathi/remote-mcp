@@ -47,11 +47,17 @@ Releases = "https://github.com/pushpendra-tripathi/remote-mcp/releases"
 Documentation = "https://github.com/pushpendra-tripathi/remote-mcp#readme"
 
 [project.optional-dependencies]
+openapi = [
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+]
 dev = [
     "pytest>=8",
     "pytest-cov>=6",
     "pytest-timeout>=2.3",
     "ruff>=0.7",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -59,6 +65,7 @@ packages = ["src/remote_mcp"]
 artifacts = [
     "src/remote_mcp/templates/**",
     "src/remote_mcp/snippets/**",
+    "src/remote_mcp/templates_sources/**",
 ]
 
 [tool.hatch.build.targets.sdist]
