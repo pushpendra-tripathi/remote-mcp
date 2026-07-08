@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import keyword
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -9,6 +10,17 @@ from rich.console import Console
 from rich.panel import Panel
 
 from remote_mcp.scaffold import scaffold_project, scaffold_tool
+from remote_mcp.sources.manifest import (
+    GeneratedFile,
+    ManifestError,
+    SourceEntry,
+    hash_bytes,
+    load_manifest,
+    save_manifest,
+    upsert_source,
+)
+from remote_mcp.sources.selection import Candidate, SelectionError, resolve_selection
+from remote_mcp.sources.writer import diff_summary, stage_and_write
 
 console = Console()
 
@@ -52,6 +64,33 @@ def _validate_project_name(name: str) -> str:
     if keyword.iskeyword(slug) or keyword.issoftkeyword(slug):
         raise typer.BadParameter(f"Project name conflicts with Python keyword: {slug!r}.")
     return name
+
+
+def _require_scaffolded_project(project_dir: Path) -> None:
+    if not (
+        (project_dir / "src" / "server.py").exists()
+        and (project_dir / "src" / "core" / "handlers.py").exists()
+    ):
+        console.print(
+            f"[red]Error: {project_dir} is not a scaffolded remote-mcp project. "
+            "Run `remote-mcp new` first.[/red]"
+        )
+        raise typer.Exit(1)
+
+
+def _print_generation_result(
+    files: dict[str, str], summary: dict[str, str], mount_lines: list[str]
+) -> None:
+    for rel, status in summary.items():
+        style = {"new": "green", "changed": "yellow", "unchanged": "dim"}[status]
+        console.print(f"  [{style}]{status:9}[/{style}] {rel}")
+    console.print(
+        Panel(
+            "\n".join(f"  [cyan]{line}[/cyan]" for line in mount_lines),
+            title="[bold]Mount in src/server.py[/bold]",
+            border_style="green",
+        )
+    )
 
 
 def _validate_tool_name(name: str) -> str:
@@ -231,3 +270,122 @@ def add_tool_cmd(
             border_style="green",
         )
     )
+
+
+@add_app.command("openapi")
+def add_openapi_cmd(
+    spec_source: str = typer.Argument(..., help="Path or URL to an OpenAPI 3.x document."),
+    project_dir: Path = typer.Option(Path("."), "--project-dir", "-p"),
+    name: str | None = typer.Option(
+        None, "--name", help="Source name / package dir (default: derived from spec title)."
+    ),
+    include: list[str] = typer.Option([], "--include", help="operationId glob(s)."),
+    exclude: list[str] = typer.Option([], "--exclude", help="operationId glob(s) to drop."),
+    tag: list[str] = typer.Option([], "--tag", help="Select whole OpenAPI tag(s)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Non-interactive; needs --include/--tag."),
+) -> None:
+    """Generate MCP tools from an OpenAPI spec. Requires: pip install 'remote-mcp[openapi]'."""
+    _require_scaffolded_project(project_dir)
+    from remote_mcp import __version__
+    from remote_mcp.sources.openapi.introspect import (
+        IntrospectionError,
+        extract_operations,
+        load_spec,
+    )
+    from remote_mcp.sources.openapi.render import _group_of, render_openapi_tools
+
+    try:
+        spec, spec_hash = load_spec(spec_source)
+        operations = extract_operations(spec)
+
+        # selection.Candidate.group is a single string, so filtering by tags
+        # there would only ever match an operation's *first* tag. Pre-filter
+        # on the full tag set here instead, then let resolve_selection's tag
+        # matching (tags=[]) be a no-op pass-through.
+        if tag:
+            tag_set = set(tag)
+            operations_for_selection = [op for op in operations if tag_set & set(op.tags)]
+            if not operations_for_selection:
+                available = sorted({t for op in operations for t in op.tags})
+                console.print(
+                    f"[red]Error: --tag matched no operations. "
+                    f"Available tags: {', '.join(available) if available else '(none)'}[/red]"
+                )
+                raise typer.Exit(1)
+            # --tag alone must still satisfy resolve_selection's "needs
+            # --include or --tag" non-interactive check.
+            resolve_include = include or ["*"]
+        else:
+            operations_for_selection = operations
+            resolve_include = include
+
+        candidates = [
+            Candidate(
+                id=op.operation_id,
+                label=f"{op.method.upper()} {op.path}",
+                group=op.tags[0] if op.tags else "",
+            )
+            for op in operations_for_selection
+        ]
+        chosen = resolve_selection(
+            candidates, include=resolve_include, exclude=exclude, tags=[], yes=yes
+        )
+    except (IntrospectionError, SelectionError) as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    chosen_ids = {c.id for c in chosen}
+    selected_ops = [op for op in operations if op.operation_id in chosen_ids]
+    try:
+        api_slug = _validate_tool_name(
+            name
+            or re.sub(r"[^a-z0-9]+", "_", spec.get("info", {}).get("title", "api").lower()).strip(
+                "_"
+            )
+        )
+    except typer.BadParameter as exc:
+        console.print(
+            f"[red]Error: cannot derive a valid source name from the spec title; "
+            f"pass --name. ({exc.message})[/red]"
+        )
+        raise typer.Exit(1) from exc
+
+    files = render_openapi_tools(api_slug, selected_ops, __version__, spec_source)
+    summary = diff_summary(project_dir, files)
+
+    try:
+        manifest = load_manifest(project_dir)
+    except ManifestError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    try:
+        stage_and_write(project_dir, files)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    upsert_source(
+        manifest,
+        SourceEntry(
+            kind="openapi",
+            name=api_slug,
+            locator=spec_source,
+            source_sha256=spec_hash,
+            selected=sorted(chosen_ids),
+            generated_files=[
+                GeneratedFile(path=rel, sha256=hash_bytes(content.encode("utf-8")))
+                for rel, content in files.items()
+            ],
+            generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            generator_version=__version__,
+        ),
+    )
+    save_manifest(project_dir, manifest)
+
+    groups = sorted({_group_of(op) for op in selected_ops})
+    mount_lines: list[str] = []
+    for g in groups:
+        mount_lines.append(f"from src.tools.{api_slug}.{g} import {api_slug}_{g}_router")
+    mount_lines += [f"mcp.mount({api_slug}_{g}_router)" for g in groups]
+    _print_generation_result(files, summary, mount_lines)
