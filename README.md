@@ -63,6 +63,9 @@ python -m remote_mcp new my-project
 |---------|--------------|
 | `remote-mcp new <name>` | Scaffold a new project |
 | `remote-mcp add tool <name>` | Add a tool stub to an existing scaffolded project |
+| `remote-mcp add openapi <SPEC>` | Generate typed MCP tools from an OpenAPI 3.x spec — requires `pip install 'remote-mcp[openapi]'` |
+| `remote-mcp add database <DSN>` | Generate read-only MCP tools from a live database schema — requires `pip install 'remote-mcp[db]'` |
+| `remote-mcp doctor` | Report drift between `sources.lock.json` and reality |
 | `remote-mcp --version` | Print version |
 
 `new` flags:
@@ -81,6 +84,8 @@ python -m remote_mcp new my-project
 | Flag | Purpose |
 |------|---------|
 | `--project-dir / -p PATH` | Target project (default `.`) |
+
+See [Sources](#sources) below for `add openapi`, `add database`, and `doctor` flags.
 
 ## What you get
 
@@ -175,6 +180,69 @@ async def my_tool(param: str, ctx: Context) -> str:
     response = await client.get("/some/endpoint", headers={"Authorization": auth_header})
     return response.json()
 ```
+
+## Sources
+
+Generate tools from what you already have — an OpenAPI spec or a database — instead of writing them by hand.
+
+### From an OpenAPI spec
+
+```bash
+pip install 'remote-mcp[openapi]'
+remote-mcp add openapi https://api.example.com/openapi.json --tag orders
+```
+
+| Flag | Purpose |
+|------|---------|
+| `--project-dir / -p PATH` | Target project (default `.`) |
+| `--name TEXT` | Source name / package dir (default: derived from spec title) |
+| `--include GLOB` (repeatable) | Select operations by operationId glob |
+| `--exclude GLOB` (repeatable) | Drop operations by operationId glob |
+| `--tag TAG` (repeatable) | Select whole OpenAPI tag(s) |
+| `--yes / -y` | Non-interactive; requires `--include` or `--tag` |
+
+On a TTY without selection flags, an interactive numbered picker (e.g. `1,3-5` or `all`) opens (operations grouped by tag). Each selected operation becomes one typed tool under `src/tools/<name>/`, with a generated test file alongside it. The command prints the exact lines to add to `src/server.py` to mount the new router — same pattern as `add tool`.
+
+### From a database
+
+```bash
+pip install 'remote-mcp[db]'
+remote-mcp add database postgresql://user:pass@host/db --include "orders*"
+```
+
+| Flag | Purpose |
+|------|---------|
+| `--project-dir / -p PATH` | Target project (default `.`) |
+| `--include GLOB` (repeatable) | Select tables by name glob |
+| `--exclude GLOB` (repeatable) | Drop tables by name glob |
+| `--schema NAME` | DB schema (driver default if unset) |
+| `--allow-write TABLE:OP` (repeatable) | Opt in to a write tool; `OP` is `insert` or `update` |
+| `--yes / -y` | Non-interactive; requires `--include` |
+
+**API tools act as the caller; database tools act as the server.** OpenAPI tools forward the caller's Bearer token, so the backend enforces the caller's own permissions. Database tools run with the server's own `DATABASE_URL` credentials — anyone who can call the MCP server can read everything the allowlist exposes. That's why tools are read-only by default: an empty allowlist exposes nothing, and every write is a separate, individually named, opt-in tool (`insert_orders`, `update_orders_by_id`, ...) enabled only via `--allow-write TABLE:OP`. There is no generic `run_sql` tool and there never will be — a free-form query tool is a prompt-injection exfiltration pump.
+
+The DSN is used only at generation time, to introspect the schema — it is never written to any file. The generated `src/tools/db/db.py` reads `DATABASE_URL` (plus `DB_MAX_ROWS`, default 200, and `DB_STATEMENT_TIMEOUT_MS`, default 5000) from the environment at runtime. `add database` appends these three keys to `env.example` (only if the file exists and doesn't already have them) as a reminder to set them in the deploy environment.
+
+### Staying current
+
+Every `add openapi` / `add database` run writes `sources.lock.json` at the project root: what was selected, the spec/schema state it came from, and a content hash per generated file. `remote-mcp doctor` reads it back and reports:
+
+| Check | Needs `--refresh` |
+|-------|--------------------|
+| Manifest present and parseable | no |
+| Generator version vs. installed `remote-mcp` | no |
+| Generated files present / locally modified | no |
+| Spec/schema drift vs. the live source | yes (network/DB access) |
+
+```bash
+remote-mcp doctor --project-dir . --refresh --json
+```
+
+Exit codes: `0` clean, `1` drift found, `2` error. `--json` emits machine-readable output for CI. Credential-bearing DSNs (postgres, mysql) can't be re-checked live — the manifest only ever stores a sanitized DSN with credentials stripped — so `--refresh` reports those sources `unreachable` rather than guessing; sqlite and other credential-free DSNs refresh normally. To pick up real drift, re-run the same `add` command: it's idempotent per source name and regenerates the files without touching anything outside the generated set.
+
+### How this differs from FastMCP's runtime OpenAPI integration
+
+FastMCP can proxy an OpenAPI spec at runtime — no generation step, but also no code you can read, patch, or grep. `remote-mcp add openapi` generates code you own: typed tool functions with generated tests, deployed through the same rail as the rest of the scaffold, with zero runtime coupling back to either the spec or this package. Nothing calls out to re-parse the spec on every request; you regenerate when you choose, and you can audit every line remote-mcp ever wrote.
 
 ## Connecting to Claude
 

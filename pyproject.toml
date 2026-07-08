@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remote-mcp"
-version = "0.3.0"
+version = "1.0.0"
 description = "Scaffold a production-ready remote MCP (Model Context Protocol) server with OAuth, RFC 8414/9728 discovery, retry, telemetry, and tests — in one command. Zero runtime dependency on this package."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Pushpendra Tripathi" }]
 keywords = ["mcp", "fastmcp", "remote", "oauth", "scaffold", "cli", "model-context-protocol", "ai"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Environment :: Web Environment",
     "Framework :: AsyncIO",

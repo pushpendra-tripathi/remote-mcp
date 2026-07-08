@@ -36,6 +36,15 @@ Server starts at http://localhost:8001. MCP endpoint: http://localhost:8001/mcp.
 | `TELEMETRY_ENABLED` | `true` | Enable JSONL telemetry |
 | `TELEMETRY_HASH_SALT` | `` | HMAC salt for user-id hashing (set per-deployment) |
 
+## Security model
+
+**API tools act as the caller; database tools act as the server.** API-backed
+tools forward the caller's Bearer token, so your backend enforces the
+caller's permissions. Database tools (added via `remote-mcp add database`)
+run with the server's own `DATABASE_URL` credentials — anything the MCP
+layer admits can read every allowlisted table. Keep the allowlist tight and
+leave writes opt-in.
+
 ## Docker
 
 A production-ready `Dockerfile` ships with the project.

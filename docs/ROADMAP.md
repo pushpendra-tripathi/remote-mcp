@@ -36,6 +36,17 @@ FastMCP). LangChain refugees (different problem).
 | "MCP changed, my scaffold rotting" | No update path | Phase 3: `doctor` + diff helper |
 | "Want to demo before scaffolding" | None | Phase 3: hosted demo |
 
+## v1.0.0 shipped
+
+Pulled Phase 2 item 9 forward, broadened it into a source axis (`add openapi`
++ `add database`), and pulled Phase 3 item 16 (`doctor`, report-only) forward
+alongside it to give the release a retention loop. CLI surface declared
+stable at 1.0.0 — breaking CLI changes require a major bump from here on.
+Design + rationale: `docs/superpowers/specs/2026-07-02-source-generators-design.md`.
+Release-checklist items from that design (PyPI/star baseline, demo recording,
+launch post, FastMCP outreach) are still open and owned by the maintainer,
+not tracked as code work.
+
 ## Roadmap
 
 ### Phase 1 — Launch + visibility (2 weeks, ship v0.3.0)
@@ -66,7 +77,7 @@ Goal: get on the map. Cross 500 PyPI downloads/week, 100 GitHub stars.
 
 Goal: be the obvious choice. Cross 2k downloads/week, 300 stars.
 
-9.  **`remote-mcp from-openapi`**: generate a tools file from an OpenAPI spec — selected endpoints become MCP tools with auth, retry, and tests. Supersedes hand-maintained per-vendor recipes. (1w)
+9.  **`remote-mcp from-openapi`**: generate a tools file from an OpenAPI spec — selected endpoints become MCP tools with auth, retry, and tests. Supersedes hand-maintained per-vendor recipes. (1w) — **DONE v1.0.0** (shipped as `remote-mcp add openapi`, broadened to a source axis alongside `add database`; see design doc below).
 10. **Compatibility matrix doc**: hand-tested support for Claude.ai web,
     Claude Desktop, Claude Code, ChatGPT, Cursor, Windsurf, Continue.
     Document quirks per client. (3d)
@@ -87,7 +98,10 @@ Goal: keep users. Cross 5k downloads/week, 600 stars, 50+ projects in
 showcase.
 
 16. **`remote-mcp doctor`**: scans scaffolded project, reports drift from
-    latest template + suggests upgrades. (1w)
+    latest template + suggests upgrades. (1w) — **DONE v1.0.0**, report-only
+    (manifest drift, generator-version drift, local modifications, and
+    `--refresh` source drift). Applying fixes automatically stays
+    `upgrade --dry-run` (item 17, still open).
 17. **`remote-mcp upgrade --dry-run`**: diff current files against latest
     template, apply user-approved patches. Hard problem but high stickiness.
     (2w)

@@ -4,6 +4,42 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-07-06
+
+remote-mcp 1.0: from scaffolder to source-connected generator. The CLI
+surface is now stable — breaking CLI changes require a major bump.
+
+### Added
+- `remote-mcp add openapi <SPEC>`: selected OpenAPI 3.x operations become
+  typed MCP tools with auth pass-through, error mapping, and generated tests.
+  Interactive picker on TTY; `--include` / `--exclude` / `--tag` globs and
+  `--name` for CI and naming. Requires `pip install 'remote-mcp[openapi]'`.
+- `remote-mcp add database <DSN>`: introspected schema becomes read-only
+  query tools (`list_<table>` / `get_<table>_by_<pk>` / `search_<table>`) with
+  allowlist enforcement (`--include` / `--exclude` / `--schema`), row caps,
+  statement timeouts, and generated tests. Writes are per-table, per-operation
+  opt-in via `--allow-write TABLE:OP` (`insert`, `update`) — never a global
+  flag, and there is no generic `run_sql` tool. DSN is used only at
+  generation time and never written to any file. Requires
+  `pip install 'remote-mcp[db]'`.
+- `sources.lock.json`: manifest of every generated source — what was
+  selected, from which spec/schema state, per-file content hashes.
+- `remote-mcp doctor`: drift report (local modifications, missing files,
+  generator-version drift, and with `--refresh` live source drift).
+  Exit codes: 0 clean, 1 drift, 2 error. `--json` for CI.
+- `env.example` in database-enabled projects gains `DATABASE_URL`,
+  `DB_MAX_ROWS`, and `DB_STATEMENT_TIMEOUT_MS` (appended by `add database`
+  when the file exists and doesn't already have them).
+
+### Security
+- Database tools carry a documented threat-model boundary: API tools act as
+  the caller (Bearer pass-through); database tools act as the server
+  (server-side credentials). Read-only by default, empty allowlist exposes
+  nothing, no generic run_sql tool is ever generated. The manifest stores
+  only a sanitized DSN (credentials stripped); postgres/mysql DSNs typically
+  report `unreachable` under `doctor --refresh` because stored locators have
+  credentials stripped — credential-free DSNs (sqlite) refresh normally.
+
 ## [0.3.0] — 2026-06-15
 
 ### Added
